@@ -1,0 +1,898 @@
+/*
+*	Progetto_definitivo.asm
+*
+*	Created: 16/06/2015 15:50:12
+*	Author: Francesco Cassano, Riccardo Luciani, Gaia Amaranta Taberna, Giulia Zappacosta
+*/
+
+
+/**********************************************************************
+*************	STIMOLATORE CARDIACO IN MODALITA' D00 e VAT	**********
+**********************************************************************/
+
+
+.NOLIST
+.INCLUDE "atmega8.inc"
+.LIST
+
+////////////////////////////////////////////////////////
+/////////////	DEFINIZIONI DELLE VARIABILI	////////////
+////////////////////////////////////////////////////////
+
+; Definizione dei registri
+
+.DEF	mp	= R16	; registro di lavoro (generico)
+.DEF	mp1 = R17	; registro di lavoro secondario (generico)
+
+; Definizione delle costanti
+
+.EQU	temp_ad = 200	; intervallo tra due conversioni su ADC1 (x 10 ms)
+.EQU	temp_ad1 = 30	; intervallo tra due conversioni su ADC2 (x 10 ms)
+.EQU	temp_int0 = 246	; intervallo tra due interrupt successivi su TC0 pari a
+
+.EQU	
+temp_int2 = 156	circa 10 ms (9.77 ms)
+; intervallo tra due interrupt successivi su TC2 pari a
+100 us
+.EQU	temp_ledr = 50	; intervallo di lampeggiamento del led rosso - batteria (x
+10 ms)
+.EQU	temp_ledy = 20	; intervallo di accensione del led giallo - atrio sentito
+(x 10 ms)
+.EQU	tstim = 10		; durata predefinita dello stimolo in modalità D00/VAT (10
+
+.EQU	
+tsh_eri = 150		x 100 us = 1ms)
+; prima soglia di tensione di batteria a 1,5 V nominali su ADC1 (V_eri = 4,5 Vcc)
+.EQU
+
+.EQU	tsh_bat = 133
+
+AV_int = 17	
+
+;	; seconda soglia di tensione di batteria a 1,33 V nominali su
+ADC1 (V_bat = 4,0 Vcc)
+durata fissa dell'intervallo AV in modalità VAT (x 10 ms)
+.EQU	av1 = 8	; durate dell'intervallo AV in modalità D00 (x 10 ms)
+.EQU	av2 = 12
+.EQU	av3 = 16
+.EQU	av4 = 20
+
+.EQU	t1 = 8	; durate dello stimolo ventricolare in modalità VAT (x  100 us)
+.EQU	t2 = 12
+.EQU	t3 = 16
+.EQU	t4 = 20
+ 
+
+; Definizione delle variabili in SRAM
+
+.DSEG
+
+vard_ad:	.BYTE 1	; regola il campionamento della tensione di batteria vard_ad1:	.BYTE 1	; regola il campionamento di IB e AV in modalità D00 vard_blink:	.BYTE 1	; regola il lampeggiamento del led rosso - batteria vard_stim:	.BYTE 1	; regola la durata dello stimolo in modalità D00/VAT adc_mem:	.BYTE 1	; memorizza la lettura della tensione di batteria
+(eseguita su ADC1)
+
+IB:	.BYTE	1	; regola la durata di IB
+IB_temp:
+
+AV:	.BYTE
+
+.BYTE	1
+
+1	; memorizza la lettura di IB tramite
+potenziometro (eseguita su ADC2)
+; regola la durata di AV AV_temp:
+	.BYTE	1	; memorizza la lettura di AV tramite
+
+t_temp:	
+.BYTE	
+1	interruttori (posti su PD0 e PD1)
+; memorizza la lettura della durata di stimolazione
+			in modalità VAT tramite interruttori (posti su PD0 e PD1)
+V_flag:	.BYTE	1	; indica se iniziare lo stimolo ventricolare
+			in modalità VAT
+flag_batt:	.BYTE	1	; controlla il led rosso (batteria) con 3
+bit:
+; bit0 (F1): il led rosso è spento
+; bit1 (F2): il led rosso lampeggia
+; bit2 (F3): il led rosso è   acceso flag_stim:	.BYTE 1	; regola la stimolazione in modalità D00/VAT As:	.BYTE 1	; settato ad 1 se si ha attività atriale
+sentita in modalità VAT
+led_on:	.BYTE 1	; regola il lampeggiamento del led giallo
+(evento atriale sentito) in modalità VAT
+edge:	.BYTE 1	; indica la presenza di un fronte di salita del segnale simil-ECG (inizio di evento atriale) in modalità VAT
+
+.CSEG
+
+
+
+rjmp	RESET ; Reset Handler rjmp	EXT_INT0 ; IRQ0 Handler
+reti	;rjmp EXT_INT1 ; IRQ1 Handler
+reti	;rjmp TIM2_COMP ; Timer2 Compare Handler rjmp	TIM2_OVF ; Timer2 Overflow Handler
+reti	;rjmp TIM1_CAPT ; Timer1 Capture Handler reti	;rjmp TIM1_COMPA ; Timer1 CompareA Handler reti	;rjmp TIM1_COMPB ; Timer1 CompareB Handler reti	;rjmp TIM1_OVF ; Timer1 Overflow Handler rjmp	TIM0_OVF ; Timer0 Overflow Handler
+reti	;rjmp SPI_STC ; SPI Transfer Complete Handler reti	;rjmp USART_RXC ; USART RX Complete Handler reti	;rjmp USART_UDRE ; UDR Empty Handler
+reti	;rjmp USART_TXC ; USART TX Complete Handler
+reti		;rjmp ADC_conv ; ADC Conversion Complete Handler reti	;rjmp EE_RDY ; EEPROM Ready Handler
+reti	;rjmp ANA_COMP ; Analog Comparator Handler
+ 
+reti	;rjmp TWSI ; Two-wire Serial Interface Handler reti	;rjmp SPM_RDY ; Store Program Memory Ready Handler
+
+
+RESET:
+; Inizia la routine principale del programma
+
+/////////////////////////////////////////////
+/////////////	INIZIALIZZAZIONI	////////////
+/////////////////////////////////////////////
+
+;;; STACK POINTER
+
+ldi	mp,0x04
+out	SPH,mp
+ldi	mp,0x5f
+out	SPL,mp
+
+
+;;; PORTE DI I/O
+
+ldi	mp,0b00000011
+out	DDRB,mp
+;	pin0 e pin1 della porta B in uscita ->pin0: stimolazione in modalità D00/VAT
+;	pin1: led giallo (lettura atrio) in modalità VAT
+
+	ldi out	mp,0b00000001 DDRC,mp	
+;	pin0	della porta C in uscita	->	led rosso (batteria)
+;
+;	pin1	e pin2 in lettura	->	pin1: tensione di batteria
+pin2: durata dell'intervallo IB, tramite potenziometro
+ldi	mp,0b00000000
+out	DDRD,mp
+; tutti i pin della porta D sono usati in lettura -> pin0 e pin1: durata dell'intervallo AV (modalità D00) / durata dello stimolo (modalità VAT), tramite interruttori
+;      pin2: lettura del segnale simil-ECG
+;     pin7: interruttore per la scelta della modalità di funzionamento (D00/VAT)
+
+ldi	mp,0x00
+out	PORTB,mp
+out	PORTC,mp
+out	PORTD,mp
+
+;	Inizializzazione dello stato delle porte:	porta B -> no stimolazione, led giallo spento (lettura atrio)
+; porta C -> led rosso spento (batteria)
+
+
+;;; TIMER COUNTERS
+;		Timer counter 0 ldi	mp,0b00000101
+out	TCCR0,mp
+;      seleziona prescaler di passo 1024 (976.5 us)
+ 
+;
+ldi		mp,temp_int0 out	TCNT0,mp
+;	seleziona l'intervallo tra interrupt pari a circa 10 ms (9.77 ms)
+
+
+; Timer counter 2
+
+ldi	mp, 0b00000001
+out	TCCR2,mp
+;	no prescaler (-> si lavora alla frequenza di clock 1MHz -> 1 us)
+
+ldi	mp,temp_int2
+out	TCNT2,mp
+;	seleziona l'intervallo tra interrupt pari a 100 us
+
+ldi	mp,0b01000001
+out	TIMSK,mp
+;	abilita l'interrupt in caso di overflow di TCNT0 e di TCNT2
+
+
+; Interrupt esterno
+
+ldi	mp,0b00000011
+out	MCUCR,mp
+;	abilita l'interrupt esterno in caso di fronte di salita dell'input su PD2 (INT0)
+
+ldi	mp,0b01000000
+out	GICR,mp
+; abilita l'interrupt esterno su INT0
+
+
+;;;	CONVERTITORE A/D
+
+ldi	mp,0b10000010 out		ADCSRA,mp
+;	interrupt non abilitato, fattore di prescaling pari a 4
+
+ldi	mp,0b11100001
+out	ADMUX,mp
+;	ADC lavora con riferimento interno a 2,56 V nominali, giustifica a sinistra il risultato e sente l'input su PC1 (ADC1)
+
+
+;;; VARIABILI
+
+ldi	mp,temp_ad
+sts	vard_ad,mp
+;
+ldi	mp,0
+sts	vard_ad1,mp
+;
+ldi	mp,temp_ledr
+sts	vard_blink,mp
+;
+ldi	mp,tstim
+sts	vard_stim,mp
+;
+ldi	mp,255
+sts	adc_mem,mp
+;
+ldi	mp, 0
+sts	IB,mp
+ 
+	sts sts	IB_temp,mp t_temp,mp
+;	
+ldi	mp,	255
+
+
+;	sts
+sts	AV,mp
+AV_temp,mp
+
+
+;	ldi
+sts
+
+ldi sts	mp,0
+V_flag,mp
+
+mp,0b00000000
+flag_batt,mp
+;	
+ldi	
+mp,0b00000000
+	sts	flag_stim,mp
+;	
+ldi	
+mp,0
+
+;	sts
+
+ldi	As,mp
+
+mp,temp_ledy
+
+;	sts
+
+ldi	led_on,mp
+
+mp,0
+	sts	edge,mp
+
+;;; STATUS REGISTER
+
+sei ;
+; abilita gli interrupt
+
+
+
+/////////////////////////////////////////////
+/////////////	LOOP PRINCIPALE	/////////////
+/////////////////////////////////////////////
+
+
+;;;;;;; CONTROLLO DELLA TENSIONE DI BATTERIA ;;;;;;;
+
+
+main_batt:
+
+lds	mp,flag_stim
+cpi	mp,1
+brne	batt_continue
+;	salto condizionato a batt_continue se non è in corso una stimolazione
+
+rjmp	scelta_mod
+;	altrimenti va a scelta_mod (scelta D00/VAT)
+
+
+batt_continue:
+
+lds	mp,vard_ad
+cpi	mp,0
+brne	check_eri
+;	salto condizionato a check_eri se non è tempo di campionare
+
+ldi	mp,temp_ad
+sts	vard_ad,mp
+;	reinizializza la variabile che regola il campionamento
+ 
+lds	mp,flag_batt
+ldi	mp1,0b00000010
+and	mp1,mp
+brne	adc_batt
+;	se il led rosso (batteria) sta lampeggiando (F2 = 1), non inizializza nuovamente vard_blink
+;	e fa un salto condizionato ad adc_batt per il controllo della tensione di batteria
+
+ldi	mp,temp_ledr
+sts	vard_blink,mp
+;	altrimenti reinizializza la variabile di temporizzazione in modo da sincronizzarne il decremento
+
+
+adc_batt:
+
+ldi	mp,0b11100001
+out	ADMUX,mp
+;	ADC sente l'input su PC1 (ADC1)
+
+in	mp,ADCSRA
+ldi	mp1,0b01000000
+or	mp,mp1
+out	ADCSRA,mp
+;	inizia la conversione
+
+
+check_conv:
+
+in	mp,ADCSRA
+ldi	mp1,0b01000000
+and	mp,mp1
+brne	check_conv
+;	aspetta che la conversione sia pronta testando ADSC (bit 6) in ADCSRA: a conversione terminata ADSC torna a 0
+
+in	mp,ADCH
+sts	adc_mem,mp
+;	legge il valore convertito su 8 bit e lo memorizza in adc_mem
+
+
+check_eri:
+
+lds	mp,adc_mem
+cpi	mp,tsh_eri
+brlo	check_blink
+;	salto condizionato a check_blink se il valore di tensione letto è minore della soglia di ERI
+
+ldi	mp,0b00000001
+sts	flag_batt,mp
+;	altrimenti imposta: F1 = 1, F2 = 0 e F3 = 0 (il led dovrà spegnersi)
+
+
+check_blink:
+
+lds	mp,adc_mem
+cpi	mp,tsh_eri
+brsh	check_bat
+;	salto condizionato se il valore di tensione letto è maggiore o uguale alla soglia di ERI
+
+ldi	mp,0b00000010
+ 
+sts	flag_batt,mp
+;	altrimenti imposta: F1 = 0, F2 = 1 e F3 = 0 (il led dovrà lampeggiare)
+
+
+check_bat:
+
+lds	mp,adc_mem
+cpi	mp,tsh_bat
+brsh	check_F1
+;	salto condizionato a check_F1 se il valore di tensione letto è maggiore o uguale alla soglia di EOL
+
+ldi	mp,0b00000100
+sts	flag_batt,mp
+;	altrimenti imposta: F1 = 0, F2 = 0 e F3 = 1 (il led dovrà accendersi)
+
+;	VERIFICA STATO flag_batt check_F1:
+
+lds	mp,flag_batt
+ldi	mp1,0b00000001
+and	mp1,mp	; verifico se F1 di flag_batt è attivo breq	check_F3
+;	salto condizionato a check_F3 se il valore di tensione letto è inferiore alla soglia di ERI (F1 = 0)
+
+ldi	mp,0b00000000
+out	PORTC,mp
+;	altrimenti spegne il led rosso
+
+
+check_F3:
+
+lds	mp,flag_batt
+ldi	mp1,0b00000100
+and	mp1,mp	; verifico se F3 di flag_batt è attivo breq	check_F2
+;	salto condizionato a check_F2 se il valore di tensione letto è superiore o uguale alla soglia di EOL (F3 = 0)
+
+ldi	mp,0b00000001
+out	PORTC,mp
+;	altrimenti accende il led rosso
+
+
+check_F2:
+
+lds	mp,flag_batt
+ldi	mp1,0b00000010
+and	mp1,mp	; verifico se F2 di flag_batt è attivo breq	scelta_mod
+;	salto condizionato a scelta_mod	(D00/VAT) se il valore di tensione letto non cade tra le soglie di EOL ed ERI (F2 = 0)
+
+lds	mp,vard_blink
+cpi	mp,0
+brne	scelta_mod
+;	altrimenti controlla se è tempo di complementare il led rosso (batteria)
+;	-> se no, salto condizionato a scelta_mod (D00/VAT)
+
+ldi	mp,temp_ledr
+sts	vard_blink,mp
+;	reinizializza la variabile di temporizzazione del lampeggio del led rosso
+ 
+in	mp,PINC
+ldi	mp1,0b00000001
+eor	mp,mp1
+out	PORTC,mp
+;	complementa lo stato del led rosso su PC0
+
+
+;;;;;;;; SCELTA TRA MODALITA' D00/VAT ;;;;;;;
+
+
+scelta_mod:
+
+in	mp,PIND
+ldi	mp1,0b10000000
+and	mp,mp1
+brne	stim_D00
+;	salto condizionato a stim_D00 (modalità D00) se PD7 = 1 -> interruttore aperto
+
+rjmp	scelta_mod1
+;	altrimenti va a scelta_mod1 (nuovo controllo dell'interruttore su PD7)
+
+
+;;;;;;; STIMOLAZIONE D00 ;;;;;;;
+
+
+stim_D00:
+
+ldi	mp1,0b11111101
+in	mp,PINB
+and	mp,mp1
+out	PORTB,mp
+;	forza il led giallo (lettura atrio) a spegnersi
+
+lds	mp,vard_ad1
+cpi	mp,0
+brne	check_IB
+;	salto condizionato a check_IB se non è tempo di campionare
+
+ldi	mp,temp_ad1
+sts	vard_ad1,mp
+;	altrimenti reinizializza la variabile di campionamento
+;;; Lettura del potenziometro per la selezione dell'intervallo base ;;; ldi	mp,0b11100010
+out	ADMUX,mp
+;	ADC sente l'input su PC2 (ADC2)
+
+in	mp,ADCSRA
+ldi	mp1,0b01000000
+or	mp,mp1
+out	ADCSRA,mp
+;	inizia la conversione
+
+
+check_conv_IB:
+
+in	mp,ADCSRA
+ldi	mp1,0b01000000
+and	mp,mp1
+ 
+brne	check_conv_IB
+;	aspetta che la conversione sia pronta testando ADSC (bit 6) in ADCSRA: a conversione terminata ADSC torna a 0
+;
+;	Codice lettura su look-up table
+
+in	XL,ADCH
+ldi	XH,0
+add	XL,XL
+adc	XH,XH
+ldi	ZL,low(2*Table_IB)
+ldi	ZH,high(2*Table_IB)
+add	ZL,XL
+adc	ZH,XH
+lpm	r1,Z+
+lpm	r2,Z
+
+sts	IB_temp,r1
+;	legge il valore convertito su 8 bit, cerca l'equivalente nella look-up table e lo memorizza nel registro dedicato della SRAM
+
+
+;;; Lettura degli interruttori per la selezione dell'intervallo atrio-ventricolare ;;; AV_00:
+in	mp,PIND
+ldi	mp1,0b00000011
+and	mp,mp1
+brne	AV_01
+
+ldi	mp, av1
+sts	AV_temp,mp
+;	se legge PD0 = 0 e PD1 = 0, memorizza il valore stabilito di intervallo AV (av1) in SRAM
+
+
+AV_01:
+
+in	mp,PIND
+ldi	mp1,0b00000001
+and	mp,mp1
+breq	AV_10
+
+ldi	mp, av2
+sts	AV_temp,mp
+;	se legge PD0 = 1 e PD1 = 0, memorizza il valore stabilito di intervallo AV (av2) in SRAM
+
+
+AV_10:
+
+in	mp,PIND
+ldi	mp1,0b00000010
+and	mp,mp1
+breq	AV_11
+
+ldi	mp, av3
+sts	AV_temp,mp
+;	se legge PD0 = 0 e PD1 = 1, memorizza il valore stabilito di intervallo AV (av3) in SRAM
+ 
+AV_11:
+
+in	mp,PIND
+ldi	mp1,0b00000011
+and	mp,mp1
+cpi	mp,0b00000011	; doppio controllo per verificare contemporaneamente la condizione su PD0 e PD1
+brne	check_IB
+
+ldi	mp, av4
+sts	AV_temp,mp
+;	se legge PD0 = 1 e PD1 = 1, memorizza il valore stabilito di intervallo AV (av4) in SRAM
+;;; Regolazione della stimolazione ;;; check_IB:
+
+lds	mp,IB
+cpi	mp,0
+brne	check_AV
+;	salto condizionato a check_AV se non è tempo di iniziare un nuovo intervallo base (ovvero se IB non è giunto al termine)
+
+lds	mp,IB_temp
+sts	IB,mp
+lds	mp,AV_temp
+sts	AV,mp
+;	altrimenti inizializza IB e AV con gli ultimi valori convertiti, sincronizzandone il decremento
+
+ldi	mp,1
+sts	flag_stim,mp
+;	imposta a 1 il flag per indicare che è in corso la stimolazione (qui atriale)
+
+
+ldi	mp,tstim
+sts	vard_stim,mp
+;	sincronizza la durata dello stimolo
+
+ldi	mp,0x01
+out	PORTB,mp
+;	inizia lo stimolo atriale (PB0)
+
+
+check_AV:
+
+lds	mp,AV
+cpi	mp,0
+brne	check_stim
+;	salto condizionato a check_stim se non è tempo di stimolare il ventricolo	(ovvero se AV non è giunto al termine)
+
+ldi	mp,1
+sts	flag_stim,mp
+;	altrimenti imposta a 1 il flag per indicare che è in corso la stimolazione (qui ventricolare)
+
+ldi	mp,tstim
+sts	vard_stim,mp
+;	sincronizza la durata dello stimolo
+ 
+ldi	mp,0x01
+out	PORTB,mp
+;	inizia lo stimolo ventricolare (PB0)
+
+ldi	mp,255
+sts	AV,mp
+;	impone AV = 255 per assicurarsi che finisca prima IB di AV
+
+
+check_stim:
+
+lds	mp,flag_stim
+cpi	mp,1
+brne	scelta_mod1
+;	salto condizionato a scelta_mod1 (nuovo controllo dell'interruttore su PD7) se non è in corso una stimolazione
+
+lds	mp,vard_stim
+cpi	mp,0
+brne	scelta_mod1
+;	altrimenti controlla se è finita la durata di stimolazione
+;	-> se no, salto condizionato a scelta_mod1 (nuovo controllo dell'interruttore su PD7)
+
+;
+ldi	mp,0
+sts	flag_stim,mp
+;	-> se sì, resetta flag_stim per indicare che è finita la stimolazione
+
+ldi	mp,0x00
+out	PORTB,mp
+;	finisce lo stimolo (PB0)
+
+;	Nuovo controllo dell'interruttore su PD7 scelta_mod1:
+
+in	mp,PIND
+ldi	mp1,0b10000000
+and	mp,mp1
+breq	main_lettura
+
+rjmp	restart
+;	se il bit 7 della porta D è ancora ad 1, va a restart (main_batt) per ricominciare un nuovo ciclo
+
+
+;;;;;;; MODALITA' VAT - LETTURA ATTIVITA' ATRIO ;;;;;;;
+
+
+main_lettura:
+
+lds	mp,edge
+cpi	mp,1
+brne	check_led
+;	salto condizionato a check_led se si ha un fronte di salita dello stimolo atriale (PD2)
+
+in	mp,PINB
+ldi	mp1,0b00000010
+or	mp,mp1
+out	PORTB,mp
+;	accende il led giallo (PB1 = 1)
+ 
+ldi	mp,temp_ledy
+sts	led_on,mp
+;	sincronizza la variabile di accensione del led giallo
+
+ldi	mp,0
+sts	edge,mp
+;	reimposta a 0 il flag che indica un fronte di salita dello stimolo atriale (PD2), si prepara per il prossimo fronte
+
+
+check_led:
+
+lds	mp,led_on
+cpi	mp,0
+brne	stim_VAT
+;	salto condizionato a stim_VAT se non è tempo di spegnere il led giallo
+
+in	mp,PINB
+ldi	mp1,0b11111101
+and	mp,mp1
+out	PORTB,mp
+;	altrimenti spegne il led giallo (PB1 = 0)
+
+
+;;;;;;; MODALITA' VAT - STIMOLAZIONE ;;;;;;;
+
+
+stim_VAT:
+
+lds	mp,As
+cpi	mp,1
+brne	check_AV1
+;	salto condizionato a check_AV1 se non ho attività atriale sentita
+
+ldi	mp,AV_int
+sts	AV,mp
+;	altrimenti inizializzo la durata dell'intervallo AV fisso
+
+ldi	mp,0
+sts	As,mp
+;	resetto l'indicatore di attività atriale sentita, gestita da interrupt esterno
+
+
+;;; Lettura degli interruttori per la selezione della durata dell'impulso di stimolazione
+;;;
+
+ 
+
+t_00:
+ 
+
+
+in	mp,PIND
+ldi	mp1,0b00000011
+and	mp,mp1
+brne	t_01
+ 
+
+
+ldi	mp,t1
+sts	t_temp,mp
+;	se legge PD0 = 0 e PD1 = 0, memorizza il valore stabilito di durata stimolazione (t1) in SRAM
+
+
+t_01:
+
+in	mp,PIND
+ 
+ldi		mp1,0b00000001
+and breq	
+t_10	mp,mp1
+ldi	mp,t2
+sts	t_temp,mp
+;	se legge PD0 = 1 e PD1 = 0, memorizza il valore stabilito di durata stimolazione (t2) in SRAM
+
+
+t_10:
+
+in ldi		mp,PIND mp1,0b00000010
+and
+breq	
+t_11	mp,mp1
+ldi	mp,t3
+sts	t_temp,mp
+;	se legge PD0 = 0 e PD1 = 1, memorizza il valore stabilito di durata stimolazione (t3) in SRAM
+
+
+t_11:
+
+in	mp,PIND
+ldi	mp1,0b00000011
+and	mp,mp1
+cpi	mp,0b00000011	; doppio controllo per verificare contemporaneamente la condizione su PD0 e PD1
+brne	check_AV1
+
+ldi	mp,t4
+sts	t_temp,mp
+;	se legge PD0 = 1 e PD1 = 1, memorizza il valore stabilito di durata stimolazione (t4) in SRAM
+;;; Regolazione della stimolazione ventricolare ;;; check_AV1:
+
+lds	mp,AV
+cpi	mp,0
+brne	check_Vflag
+;	salto condizionato a check_Vflag se non è tempo di stimolare il ventricolo, ovvero se AV non è giunto a termine
+
+ldi	mp,255
+sts	AV,mp
+;	altrimenti reinizializzo AV a 255
+
+ldi	mp,1
+sts	V_flag,mp
+;	imposto a 1 il flag che indica che è tempo di iniziare un nuovo stimolo ventricolare
+
+
+check_Vflag:
+
+lds	mp,V_flag
+cpi	mp,1
+brne	stim_V
+ 
+;	salto condizionato a stim_V se non è tempo di stimolare il ventricolo
+
+in	mp,PINB
+ldi	mp1,0b00000001
+or	mp,mp1
+out	PORTB,mp
+;	altrimenti inizia lo stimolo ventricolare (PB0) ldi	mp,1
+sts	flag_stim,mp
+;	setto il flag che indica una stimolazione in corso
+
+lds	mp,t_temp
+sts	vard_stim,mp
+;	sincronizzo la durata dello stimolo
+
+ldi	mp,0
+sts	V_flag,mp
+;	imposto a 0 il flag per indicare che non è tempo di iniziare un nuovo stimolo ventricolare
+
+
+stim_V:
+
+lds	mp,flag_stim
+cpi	mp,1
+brne	restart
+;	salto condizionato a restart (inizia un nuovo ciclo) se non è in corso una stimolazione
+
+lds	mp,vard_stim
+cpi	mp,0
+brne	restart
+;	altrimenti valuta se è terminata la durata dell'impulso
+;	-> se no, salto condizionato a restart (inizia un nuovo ciclo)
+
+in	mp,PINB
+ldi	mp1,0b11111110
+and	mp,mp1
+out	PORTB,mp
+;	-> se sì, termina la stimolazione ventricolare (PB0)
+
+ldi	mp,0
+sts	flag_stim,mp
+;	resetta flag_stim per indicare che è finita la stimolazione
+;;; Inizio di un nuovo ciclo ;;; restart:
+rjmp	main_batt
+;	ritorno al controllo della tensione di batteria
+
+
+
+
+//////////////////////////////////////////////////
+/////////////	RISPOSTE AD INTERRUPT	////////////
+//////////////////////////////////////////////////
+ 
+TIM0_OVF:
+
+push	mp
+in	mp,SREG
+push	mp
+;	memorizza mp e SREG nello stack pointer
+
+ldi	mp,temp_int0
+out	TCNT0,mp
+;	reinizializza la variabile che regola l'overflow
+
+lds	mp,vard_ad
+dec	mp
+sts	vard_ad,mp
+
+lds	mp,vard_blink
+dec	mp
+sts	vard_blink,mp
+
+lds	mp,vard_ad1
+dec	mp
+sts	vard_ad1,mp
+
+lds	mp,IB
+dec	mp
+sts	IB,mp
+
+lds	mp,AV
+dec	mp
+sts	AV,mp
+
+lds	mp,led_on
+dec	mp
+sts	led_on,mp
+;	decrementa le variabili
+
+pop	mp
+out	SREG,mp
+pop	mp
+;	riprende SREG e mp dallo stack pointer e ritorna al programma reti
+
+TIM2_OVF:
+
+push	mp
+in	mp,SREG
+push	mp
+;	memorizza mp e SREG nello stack pointer
+
+ldi	mp,temp_int2
+out	TCNT2,mp
+;	reinizializza la variabile che regola l'overflow
+
+lds	mp, vard_stim
+dec	mp
+sts	vard_stim, mp
+;	decrementa la variabile
+
+pop	mp
+out	SREG,mp
+ 
+pop	mp
+;	riprende SREG e mp dallo stack pointer e ritorna al programma reti
+
+EXT_INT0:
+
+push	mp
+in	mp,SREG
+push	mp
+;	memorizza mp e SREG nello stack pointer
+
+ldi	mp,1
+sts	As,mp
+;	imposta a 1 il flag che indica un'attività atriale sentita (triggera la stimolazione ventricolare a partire da As)
+
+ldi	mp,1
+sts	edge,mp
+;	imposta a 1 il flag che indica un fronte di salita del segnale simil-ECG (regola il lampeggiamento del led giallo)
+
+pop	mp
+out	SREG,mp
+pop	mp
+;	riprende SREG e mp dallo stack pointer e ritorna al programma reti
+
+
+.NOLIST
+.INCLUDE "Table_IB.inc"
+.LIST
+; include la look-up table con i valori dell'intervallo IB (modalità D00)
